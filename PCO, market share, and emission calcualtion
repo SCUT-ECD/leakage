@@ -1,0 +1,992 @@
+import numpy as np
+import pandas as pd
+import math
+from scenario_tt import scenarios
+
+all_years_df = pd.DataFrame()
+def calculate_annual_cost(
+        output_path='comtt_annual_cost1.xlsx',
+        #years= range(2025,2051),
+        years=[2020,2021,2022,2023,2024],
+        fastsim_file='tt_output_fastsim_tractormix_S.xlsx',
+        vehicle_file='tt_vehicle_represent_params_tractormix.xlsx',
+        year_file='year_varies_tractormix_S.xlsx',
+        mc_results_file='tt_mc_results_ltractor.xlsx',
+        remainrate_file = 'remainrate_temp1.xlsx ',
+        #esubsidy_file = 'es_temp.xlsx '
+
+):
+    """计算不同年份动力系统成本及碳排放主函数
+
+    参数：
+    output_path: 结果输出路径
+    years: 需要计算的年份列表
+    fastsim_file: 快充模拟数据文件路径
+    vehicle_file: 车辆参数文件路径
+    year_file: 年度变量数据文件路径
+    mc_results_file: 蒙特卡洛模拟结果文件路径
+    """
+    # 初始化数据容器
+    costoutput_data = []
+    all_data = pd.DataFrame({
+        'Year': [], 'diesel_count': [], 'railway_count': [], 'lng_count': []
+    })
+    all_data1 = pd.DataFrame({
+        'Year': [], 'diesel_count': [], 'railway_count': [], 'lng_count': []
+    })
+
+    with pd.ExcelWriter(output_path, engine='openpyxl', mode='w') as writer:
+        for year in years:
+            _process_year(
+                year=year,
+                writer=writer,
+                fastsim_file_path=fastsim_file,
+                vehicle_file_path=vehicle_file,
+                year_file_path=year_file,
+                mc_results_file=mc_results_file,
+                remainrate_file_path = remainrate_file,
+                #esubsidy_file_path = esubsidy_file,
+                all_data=all_data,
+                all_data1=all_data1
+            )
+
+    print(f"所有年份计算结果已保存至: {output_path}")
+
+
+def _process_year(year, writer, fastsim_file_path, remainrate_file_path,vehicle_file_path, year_file_path, mc_results_file, all_data, all_data1):
+    """处理单个年份的计算逻辑"""
+    # 固定参数配置
+    usefactor = 0.8
+    shape = -3.48315166110525E-07
+    Urea_usage_percent = 0.1
+    unit_urea_usage_cost = 3
+    rate_freeway = 240
+    UF = 0.1
+    discount_rate = 0.04
+
+    # 数据加载
+    fastsim_batteryprice_df = pd.read_excel(fastsim_file_path, sheet_name='batteryprice', index_col=0, header=0)
+    fastsim_bodyprice_df = pd.read_excel(fastsim_file_path, sheet_name='bodyprice', index_col=0, header=0)
+    # ... [其余数据加载代码与原文件保持一致] ...
+    year_fcprice_df = pd.read_excel(year_file_path, sheet_name='fcprice',index_col=0, header=0)
+    region_fcprice_df = pd.read_excel(year_file_path, sheet_name='regionfcprice', index_col=0, header=0)
+    year_subsidy_df = pd.read_excel(year_file_path, sheet_name='subsidy', index_col=0, header=0)
+    region_subsidy_df = pd.read_excel(year_file_path, sheet_name='regionsubsidy', index_col=0, header=0)
+    year_ch_efficiency_df = pd.read_excel(year_file_path, sheet_name='ch_efficiency', index_col=0, header=0)
+    year_retire_df = pd.read_excel(year_file_path, sheet_name='retire', index_col=0, header=0)
+    year_ptretire_df = pd.read_excel(year_file_path, sheet_name='ptretire', index_col=0, header=0)
+    year_yearretire_df = pd.read_excel(year_file_path, sheet_name='yearretire', index_col=0, header=0)
+    year_charging_prob_factor_df = pd.read_excel(year_file_path, sheet_name='yearchargprob', index_col=0, header=0)
+    year_unittonkmcost_df = pd.read_excel(year_file_path, sheet_name='unittonkmcost', index_col=0, header=0)
+    year_carbontax_df = pd.read_excel(year_file_path, sheet_name='carbontax', index_col=0, header=0)
+    #year_esubsidy_df = pd.read_excel(year_file_path, sheet_name='esubsidy', index_col=0, header=0)
+    #year_esubsidy_df = pd.read_excel(esubsidy_file_path, sheet_name='esubsidy', index_col=0, header=0)
+    # year_efuelcarbon_df = pd.read_excel(year_file_path, sheet_name='efuelcarbon', index_col=0, header=0)
+    #year_remainrate_df = pd.read_excel(year_file_path, sheet_name='remainrate', index_col=0, header=0)
+    year_remainrate_df = pd.read_excel(remainrate_file_path, sheet_name='remainrate', index_col=0, header=0)
+    year_stationdistance_df = pd.read_excel(year_file_path, sheet_name='stationdistance', index_col=0, header=0)
+    fastsim_riskwtp_df = pd.read_excel(fastsim_file_path, sheet_name='risk_wtp', index_col=0, header=0)
+    fastsim_batteryrent_df = pd.read_excel(fastsim_file_path, sheet_name='batteryrent', index_col=0, header=0)
+    fastsim_FC_df = pd.read_excel(fastsim_file_path, sheet_name='FC', index_col=0, header=0)
+    fastsim_yearFC_df = pd.read_excel(fastsim_file_path, sheet_name='yearFC', index_col=0, header=0)
+    fastsim_degradeFC_df = pd.read_excel(fastsim_file_path, sheet_name='degradeFC', index_col=0, header=0)
+    fastsim_MSRP_df = pd.read_excel(fastsim_file_path, sheet_name='MSRP1', index_col=0, header=0)
+    fastsim_yearMSRP_df = pd.read_excel(fastsim_file_path, sheet_name='yearMSRP', index_col=0, header=0)
+    fastsim_mmcost_df = pd.read_excel(fastsim_file_path, sheet_name='mmcost', index_col=0, header=0)
+    fastsim_retirekm_df = pd.read_excel(fastsim_file_path, sheet_name='retirekm', index_col=0, header=0)
+    fastsim_retireyear_df = pd.read_excel(fastsim_file_path, sheet_name='retireyear', index_col=0, header=0)
+    fastsim_insura_df = pd.read_excel(fastsim_file_path, sheet_name='insura', index_col=0, header=0)
+    # fastsim_cargomass_df = pd.read_excel(fastsim_file_path, sheet_name='cargomass', index_col=0, header=0)
+    # fastsim_cargofc_df = pd.read_excel(fastsim_file_path, sheet_name='cargoFC', index_col=0, header=0)
+    fastsim_volume_df = pd.read_excel(fastsim_file_path, sheet_name='volume', index_col=0, header=0)
+    fastsim_battery_capacity_df = pd.read_excel(fastsim_file_path, sheet_name='battery_capacity', index_col=0, header=0)
+    fastsim_mmavalibility_df = pd.read_excel(fastsim_file_path, sheet_name='mmavalibility', index_col=0, header=0)
+    # fastsim_unitcostablecapacity_df = pd.read_excel(fastsim_file_path, sheet_name='unitcostablecapacity',index_col=0,header=0)
+    # fastsim_unitcostrestcapacity_df = pd.read_excel(fastsim_file_path, sheet_name='unitcostrestcapacity',index_col=0,header=0)
+    # fastsim_tonkm_df = pd.read_excel(fastsim_file_path, sheet_name='tonkm', index_col=0, header=0)
+    fastsim_totalmass_df = pd.read_excel(fastsim_file_path, sheet_name='totalmass', index_col=0, header=0)
+    fastsim_cubeweight_df = pd.read_excel(fastsim_file_path, sheet_name='cubeweight', index_col=0, header=0)
+    # fastsim_findingtime_df = pd.read_excel(fastsim_file_path, sheet_name='findingtime', index_col=0, header=0)
+    fastsim_highwayratio_df = pd.read_excel(fastsim_file_path, sheet_name='highwayratio', index_col=0, header=0)
+    salary_df = pd.read_excel(vehicle_file_path, sheet_name='salary', index_col=0, header=0)
+    charging_prob_df = pd.read_excel(vehicle_file_path, sheet_name='charging_prob', index_col=0, header=0)
+    fastsim_infrastructure_df = pd.read_excel(fastsim_file_path, sheet_name='infrastructure', index_col=0, header=0)
+    fastsim_servicecapacity_df = pd.read_excel(fastsim_file_path, sheet_name='servicecapacity', index_col=0, header=0)
+    fastsim_visioncarbonintensity_df = pd.read_excel(fastsim_file_path, sheet_name='visioncarbonintensity', index_col=0,
+                                                     header=0)
+
+    # 蒙特卡洛模拟数据处理
+    df = pd.read_excel(mc_results_file)
+    fueloutput_data = []
+
+    for index, row in df.iterrows():
+        # 原文件中的车辆循环处理逻辑
+        # ... [保持原有数据处理逻辑不变] ...
+        vehicle = row['vehicle']
+        province = row['province']
+        daily_mileage_demand1 = row['distance'] * row['frequence']
+        daily_mileage_demand = daily_mileage_demand1 / 100
+        #road_condition_factor = row['kroad']
+        #temperature_factor = row['temperature']
+        #traffic_factor = row['traffic']
+        load_factor = row['loadfactor']
+        opd = row['opd']
+        daily_mileage_actual = np.full(opd, daily_mileage_demand)  # 百公里
+        annual_mileage_actual = daily_mileage_actual.sum()
+        for power_system in fastsim_FC_df.columns:
+            riskwtp = fastsim_riskwtp_df.loc[year, power_system]
+            unitbatteryrent = fastsim_batteryrent_df.loc[year, power_system]
+            riskcost = 150000 * math.exp(shape * riskwtp * 1000)
+            unitbatteryprice = fastsim_batteryprice_df.loc[year, power_system]
+            bodyprice = fastsim_bodyprice_df.loc[vehicle, power_system]
+            mmavalibility_factor = fastsim_mmavalibility_df.loc[year, power_system]
+            # unitcost_ablecapacity = fastsim_unitcostablecapacity_df.loc[year, power_system]
+            # unitcost_restcapacity = fastsim_unitcostrestcapacity_df.loc[year, power_system]
+            # findingtime = fastsim_findingtime_df.loc[power_system,province]
+            # if power_system == 'DICE':
+            # DICE_findingtime = findingtime
+            # if power_system == 'BEVF510':
+            # BEV_findingtime = findingtime
+            # if power_system == 'EDICE':
+            # EDICE_findingtime = findingtime
+            # if power_system == 'ELICE':
+            # ELICE_findingtime = findingtime
+
+            highwayratio = fastsim_highwayratio_df.loc[power_system, province]
+            visioncarbonintensity = fastsim_visioncarbonintensity_df.loc[year, power_system]
+            infrastructure = fastsim_infrastructure_df.loc[year, power_system]
+            servicecapacity = fastsim_servicecapacity_df.loc[year, power_system]
+            battery_capacity = fastsim_battery_capacity_df.loc[vehicle, power_system]
+            infrastructurecost = infrastructure / servicecapacity
+
+            if power_system in ['H2ICE70', 'FCEV']:
+                infrastructurecost = infrastructurecost
+
+            volume = fastsim_volume_df.loc[vehicle, power_system]
+            retirekm = fastsim_retirekm_df.loc[vehicle, power_system]
+            retireyear = fastsim_retireyear_df.loc[vehicle, power_system]
+            batteryprice = unitbatteryprice * battery_capacity
+            retire_age = retirekm / 100 / annual_mileage_actual
+            if retire_age > 15:
+                retire_age = 15
+            batteryrentcost = unitbatteryrent * 12
+            #if power_system == 'DICE':
+                #DICE_volume = volume
+            #if power_system == 'EDPHEV':
+                #EDPHEV_volume = volume
+            #if power_system == 'ELPHEV':
+                #ELPHEV_volume = volume
+            if power_system == 'BEVF730':
+                BEVS_battery_capacity = battery_capacity
+            unit_mmcost = fastsim_mmcost_df.loc[vehicle, power_system]
+            yearMSRP_value = fastsim_yearMSRP_df.loc[year, power_system]
+            mmavalibility = -150000 * math.log(mmavalibility_factor, 2.71828)
+            #if power_system == 'DICE':
+                #DICE_mmavalibility = mmavalibility
+            #if power_system == 'BEVF730':
+                #BEV_mmavalibility = mmavalibility
+            if power_system == 'NGICE':
+                lng_mmavalibility = mmavalibility
+            if power_system == 'MICE':
+                mmavalibility = mmavalibility * 1
+            MSRP_value = bodyprice * yearMSRP_value + batteryprice
+            purchasetax = MSRP_value / (1 + 0.17) * 0.1
+            buycost = MSRP_value + purchasetax
+            if power_system == 'DICE':
+                DICE_buycost = buycost
+            #if power_system == 'BEVF730':
+                #BEV_buycost = MSRP_value
+            if power_system == 'NGICE':
+                lng_buycost = buycost
+            if power_system in ['PHEV', 'EDPHEV', 'ELPHEV', 'MICE', 'EDICE', 'ELICE', 'FCEV', 'BEVF282', 'BEVF510',
+                                'BEVF600', 'BEVF800', 'BEVE282', 'BEVF730', 'BEVE510', 'BEVF900', 'H2ICE70']:
+                purchasetax = purchasetax * 0
+            insura_cost = fastsim_insura_df.loc[vehicle, power_system]
+            totalmass1 = fastsim_totalmass_df.loc[year, power_system]
+            totalmass = round(totalmass1, 1)
+            cubeweight = fastsim_cubeweight_df.loc[year, power_system]
+            maxloadmass = round(totalmass - cubeweight, 1)
+            unit_tonkm_cost = year_unittonkmcost_df.loc[year, province]
+            # if maxloadmass in fastsim_cargofc_df.index and power_system in fastsim_cargofc_df.columns:
+            # fullcargofc = fastsim_cargofc_df.loc[maxloadmass, power_system]
+            # half_cargomass = round(maxloadmass / 2, 1)
+            # if half_cargomass in fastsim_tonkm_df.index and power_system in fastsim_tonkm_df.columns:
+            # option_half_tonkm = fastsim_tonkm_df.loc[half_cargomass, power_system]
+            # realcargomass1 = load_factor * (totalmass - cubeweight)
+            # realcargomass = round(realcargomass1, 1)
+            year_fc_value = fastsim_yearFC_df.loc[year, power_system]
+            degrade_fc_value = fastsim_degradeFC_df.loc[year, power_system]
+            real_unit_fc = degrade_fc_value * year_fc_value * fastsim_FC_df.loc[vehicle, power_system]
+
+            if power_system == 'DICE':
+                EDICE_real_unit_fc = real_unit_fc
+                DICE_real_unit_fc = EDICE_real_unit_fc
+            if power_system == 'BEVF730':
+                BEV_real_unit_fc = real_unit_fc
+            if power_system == 'NGICE':
+                ELICE_real_unit_fc = real_unit_fc
+                lng_real_unit_fc = ELICE_real_unit_fc
+            # if power_system == 'EDICE':
+            # EDICE_real_unit_fc =real_unit_fc * blendrate +DICE_real_unit_fc*(1-blendrate)
+            # real_unit_fc = real_unit_fc * blendrate + DICE_real_unit_fc * (1 - blendrate)
+            # if power_system == 'ELICE':
+            # ELICE_real_unit_fc =real_unit_fc * blendrate +NGICE_real_unit_fc*(1-blendrate)
+            # real_unit_fc = real_unit_fc * blendrate + NGICE_real_unit_fc * (1 - blendrate)
+            daily_fuel_consumption = daily_mileage_actual * real_unit_fc
+
+            # if power_system == 'PHEV':
+            # DICE_annual_fuel_consumption = annual_mileage_actual * (1-UF) * DICE_real_unit_fc
+            # BEV_annual_fuel_consumption = annual_mileage_actual * UF * BEV_real_unit_fc
+            # annual_fuel_consumption = 0
+            if power_system == 'EDPHEV':
+                EDICE_annual_fuel_consumption = annual_mileage_actual * (1 - UF) * real_unit_fc
+                BEV_annual_fuel_consumption = annual_mileage_actual * UF * BEV_real_unit_fc
+                annual_fuel_consumption = 0
+            if power_system == 'ELPHEV':
+                ELICE_annual_fuel_consumption = annual_mileage_actual * (1 - UF) * real_unit_fc
+                BEV_annual_fuel_consumption = annual_mileage_actual * UF * BEV_real_unit_fc
+                annual_fuel_consumption = 0
+            else:
+                annual_fuel_consumption = daily_fuel_consumption.sum()  # L kwh
+            remainrate = year_remainrate_df.loc[year, power_system]
+
+            ediesel_visioncarbonintensity = fastsim_visioncarbonintensity_df.loc[year, 'ediesel']
+            eLNG_visioncarbonintensity = fastsim_visioncarbonintensity_df.loc[year, 'eLNG']
+            if power_system == 'DICE':
+                EDICE_visioncarbonintensity = visioncarbonintensity * remainrate + (
+                        1 - remainrate) * ediesel_visioncarbonintensity
+                DICE_visioncarbonintensity = EDICE_visioncarbonintensity
+            if power_system == 'BEVF730':
+                BEV_visioncarbonintensity = visioncarbonintensity
+            if power_system == 'NGICE':
+                ELICE_visioncarbonintensity = visioncarbonintensity * remainrate + (
+                        1 - remainrate) * eLNG_visioncarbonintensity
+                NGICE_visioncarbonintensity = ELICE_visioncarbonintensity
+            # if power_system == 'EDICE':
+            # E_visioncarbonintensity = visioncarbonintensity
+            # EDICE_visioncarbonintensity = DICE_visioncarbonintensity * remainrate+(1-remainrate)* E_visioncarbonintensity
+            # if power_system == 'ELICE':
+            # E_visioncarbonintensity = visioncarbonintensity
+            # ELICE_visioncarbonintensity = NGICE_visioncarbonintensity * remainrate+ (1-remainrate) * E_visioncarbonintensity
+
+            if power_system in ['H2ICE35', 'H2ICE70', 'FCPHEV', 'FCEV']:
+                emission = visioncarbonintensity * annual_fuel_consumption
+            elif power_system in ['BEVF282', 'BEVF510', 'BEVE282', 'BEVF730', 'BEVE510', 'BEVF600', 'BEVF800',
+                                  'BEVF900']:
+                emission = visioncarbonintensity * annual_fuel_consumption
+            elif power_system == 'DICE':
+                emission = DICE_visioncarbonintensity * annual_fuel_consumption
+            elif power_system == 'NGICE':
+                emission = NGICE_visioncarbonintensity * annual_fuel_consumption
+            # elif power_system == 'PHEV':
+            # emission = DICE_visioncarbonintensity * DICE_annual_fuel_consumption  + BEV_visioncarbonintensity * BEV_annual_fuel_consumption
+            elif power_system == 'EDPHEV':
+                emission = EDICE_visioncarbonintensity * EDICE_annual_fuel_consumption + BEV_visioncarbonintensity * BEV_annual_fuel_consumption
+            elif power_system == 'ELPHEV':
+                emission = ELICE_visioncarbonintensity * ELICE_annual_fuel_consumption + BEV_visioncarbonintensity * BEV_annual_fuel_consumption
+            # elif power_system == 'EDICE':
+            # emission = DICE_visioncarbonintensity *(1-blendrate)  * annual_mileage_actual * DICE_real_unit_fc + blendrate* E_visioncarbonintensity* annual_mileage_actual * EDICE_real_unit_fc
+            # elif power_system == 'ELICE':
+            # emission = NGICE_visioncarbonintensity *(1-blendrate)  * annual_mileage_actual * NGICE_real_unit_fc+ blendrate* E_visioncarbonintensity* annual_mileage_actual * EDICE_real_unit_fc
+            else:
+                emission = visioncarbonintensity * annual_fuel_consumption
+            carbontax = year_carbontax_df.loc[year, power_system]
+            abatement_cost = emission / 1000 * carbontax
+            emissionton = emission / 1000
+            urea_usage_cost = remainrate * annual_fuel_consumption * Urea_usage_percent * unit_urea_usage_cost
+            if power_system == 'PHEV':
+                unit_range = UF * BEVS_battery_capacity / BEV_real_unit_fc * 3 + (1 - UF) * volume / real_unit_fc
+            elif power_system == 'EDPHEV':
+                unit_range = UF * BEVS_battery_capacity / BEV_real_unit_fc * 3 + (1 - UF) * volume / real_unit_fc
+            elif power_system == 'ELPHEV':
+                unit_range = UF * BEVS_battery_capacity / BEV_real_unit_fc * 3 + (1 - UF) * volume / real_unit_fc
+            elif power_system in ['BEVF282', 'BEVF510', 'BEVE282', 'BEVF730', 'BEVE510', 'BEVF600', 'BEVF800',
+                                  'BEVF900']:
+                unit_range = 0.95 * battery_capacity / real_unit_fc
+            else:
+                unit_range = 0.95 * volume / real_unit_fc  # 全载重充满电一次能跑多少100公里
+            battery_km = 3000 * battery_capacity / real_unit_fc * 0.8
+
+            # if power_system == 'PHEV':
+            # DICE_num_refuel_value = round(annual_mileage_actual*(1-UF) / (DICE_volume*0.9/DICE_real_unit_fc))
+            # BEVS_num_refuel_value = round(annual_mileage_actual * UF / (BEVS_battery_capacity / BEV_real_unit_fc*3))
+            # num_refuel_value = DICE_num_refuel_value + BEVS_num_refuel_value
+            # elif power_system == 'EDPHEV':
+            # EDICE_num_refuel_value = round(annual_mileage_actual*(1-UF) / (EDPHEV_volume*0.9/EDICE_real_unit_fc))
+            # BEVS_num_refuel_value = round(annual_mileage_actual * UF / (BEVS_battery_capacity / BEV_real_unit_fc*3))
+            # num_refuel_value = EDICE_num_refuel_value + BEVS_num_refuel_value
+            # elif power_system == 'ELPHEV':
+            # ELICE_num_refuel_value = round(annual_mileage_actual*(1-UF) / (ELPHEV_volume*0.9/ELICE_real_unit_fc))
+            # BEVS_num_refuel_value = round(annual_mileage_actual * UF / (BEVS_battery_capacity / BEV_real_unit_fc*3))
+            # num_refuel_value = ELICE_num_refuel_value + BEVS_num_refuel_value
+            # else:
+            # num_refuel_value = round(annual_mileage_actual / unit_range)
+            # option_maxtonkm = unit_range
+
+            if retire_age >= retireyear:
+                resale_value_factor = 0
+            else:
+                retire_age = math.ceil(retire_age)
+                if vehicle in year_retire_df.index and retire_age in year_retire_df.columns:
+                    resale_value_factor_1 = year_retire_df.loc[vehicle, retire_age]
+                    if vehicle in year_ptretire_df.index and power_system in year_ptretire_df.columns:
+                        resale_value_factor_2 = resale_value_factor_1 * year_ptretire_df.loc[vehicle, power_system]
+                        if year in year_yearretire_df.index and power_system in year_yearretire_df.columns:
+                            resale_value_factor = resale_value_factor_2 * year_yearretire_df.loc[year, power_system]
+
+            if year in year_ch_efficiency_df.index and power_system in year_ch_efficiency_df.columns:
+                ch_efficiency = year_ch_efficiency_df.loc[year, power_system]  # kwh/hour
+                if power_system == 'DICE':
+                    DICE_ch_efficiency = ch_efficiency
+                if power_system == 'NGICE':
+                    lng_ch_efficiency = ch_efficiency
+                if power_system == 'BEVF730':
+                    BEV_ch_efficiency = ch_efficiency
+                # if power_system == 'EDICE':
+                # EDICE_ch_efficiency = ch_efficiency
+                # if power_system == 'ELICE':
+                # ELICE_ch_efficiency = ch_efficiency
+                if year in year_fcprice_df.index and power_system in year_fcprice_df.columns:
+                    regionfcprice = region_fcprice_df.loc[power_system, province]
+                    fcprice = year_fcprice_df.loc[year, power_system] * regionfcprice  # $/L  $/kwh
+                    EDfcprice = year_fcprice_df.loc[year, 'EDICE'] * regionfcprice
+                    ELfcprice = year_fcprice_df.loc[year, 'ELICE'] * regionfcprice
+                    if power_system == 'DICE':
+                        EDICE_fuelprice = EDfcprice * (1 - remainrate) + fcprice * remainrate
+                        DICE_fuelprice = EDICE_fuelprice
+                    if power_system == 'BEVF730':
+                        BEVS_fuelprice = fcprice
+                        # print(f"BEVS_fuelprice {BEVS_fuelprice}")
+                    if power_system == 'NGICE':
+                        ELICE_fuelprice = ELfcprice * (1 - remainrate) + fcprice * remainrate
+                        # print(f"ELfcprice {ELfcprice}")
+                        NGICE_fuelprice = ELICE_fuelprice
+                        #print(f" NGICE_fuelprice {NGICE_fuelprice}")
+                    # if power_system == 'EDICE':
+                    # EDICE_fuelprice = fcprice*(1-remainrate) +DICE_fuelprice*remainrate
+                    # if power_system == 'ELICE':
+                    # ELICE_fuelprice = fcprice*(1-remainrate) +NGICE_fuelprice*remainrate
+                    # if power_system == 'EDICE':
+                    # fuel_cost = blendrate * annual_mileage_actual * EDICE_real_unit_fc * EDICE_fuelprice + (1 - blendrate) * annual_mileage_actual * DICE_real_unit_fc * DICE_fuelprice
+                    # elif power_system == 'ELICE':
+                    # fuel_cost = blendrate * annual_mileage_actual * ELICE_real_unit_fc * ELICE_fuelprice + (1 - blendrate) * annual_mileage_actual * NGICE_real_unit_fc * NGICE_fuelprice
+                    # if power_system == 'PHEV':
+                    # fuel_cost = UF * annual_mileage_actual * BEV_real_unit_fc * BEVS_fuelprice + (1-UF)*annual_mileage_actual*DICE_real_unit_fc*DICE_fuelprice
+                    if power_system == 'EDPHEV':
+                        fuel_cost = UF * annual_mileage_actual * BEV_real_unit_fc * BEVS_fuelprice + (1 - UF) * annual_mileage_actual * real_unit_fc * EDICE_fuelprice
+                    elif power_system == 'ELPHEV':
+                        fuel_cost = UF * annual_mileage_actual * BEV_real_unit_fc * BEVS_fuelprice + (1 - UF) * annual_mileage_actual * real_unit_fc * ELICE_fuelprice
+                    elif power_system == 'DICE':
+                        fuel_cost = annual_mileage_actual * real_unit_fc * DICE_fuelprice
+                    elif power_system == 'NGICE':
+                        fuel_cost = annual_mileage_actual * real_unit_fc * NGICE_fuelprice
+                    elif power_system == 'MICE':
+                        fuel_cost = annual_mileage_actual * real_unit_fc * fcprice * 1
+                    elif power_system in ['FCEV', 'H2ICE']:
+                        fuel_cost = annual_mileage_actual * real_unit_fc * fcprice * 1
+                    else:
+                        fuel_cost = annual_fuel_consumption * fcprice
+                    if vehicle in salary_df.index and province in salary_df.columns:
+                        unit_salary = salary_df.loc[vehicle, province]
+                        if power_system == 'DICE':
+                            DICE_fcprice = fcprice
+                        if power_system == 'NGICE':
+                            lng_fcprice = fcprice
+                        if power_system in charging_prob_df.index and province in charging_prob_df.columns:
+                            charging_prob_now = charging_prob_df.loc[power_system, province]
+                            if year in year_charging_prob_factor_df.index and power_system in year_charging_prob_factor_df.columns:
+                                charging_prob_factor = year_charging_prob_factor_df.loc[year, power_system]
+                                charging_prob = charging_prob_now * charging_prob_factor
+                                if power_system == 'DICE':
+                                    DICE_charging_prob = charging_prob
+                                if power_system == 'NGICE':
+                                    lng_charging_prob = charging_prob
+                                if power_system == 'BEVF730':
+                                    BEVS_charging_prob = charging_prob
+                                # if power_system == 'EDICE':
+                                # EDICE_charging_prob = charging_prob
+                                # if power_system == 'ELICE':
+                                # ELICE_charging_prob = charging_prob
+                                ablecapacity = 0.9 * 0.9 * volume
+                                restcapacity = 0.5 * 0.9 * volume
+                                pro_ablecapacity = 0.6
+                                pro_restcapacity = 1 - pro_ablecapacity
+                                final_refuelcapacity = ablecapacity * pro_ablecapacity + restcapacity * pro_restcapacity
+                                daily_km_access = 0.95 * battery_capacity / real_unit_fc
+                                daily_km_access_array = np.full(daily_mileage_actual.shape, daily_km_access)
+                                daily_mileage_demand_array = np.full(daily_mileage_actual.shape,
+                                                                     daily_mileage_demand)
+
+                                if power_system == 'DICE':
+                                    baseloadmass = maxloadmass
+                                    basecubeweight = cubeweight
+                                if load_factor < 1:
+                                    loss_cost2 = 0
+                                else:
+                                    if cubeweight < basecubeweight:
+                                        loss_cost2 = (
+                                                             basecubeweight - cubeweight) * annual_mileage_actual * 100 * unit_tonkm_cost
+                                    else:
+                                        loss_cost2 = (
+                                                             cubeweight - basecubeweight) * annual_mileage_actual * 100 * unit_tonkm_cost  # 0.15是指大宗物流占比
+                                tonkmloss_cost = loss_cost2
+                                anxiety_costdiesel_count = 0
+                                anxiety_costrailway_count = 0
+                                anxiety_costlng_count = 0
+                                if power_system in ['NGICE']:
+                                    lnglosscost = tonkmloss_cost
+                                if power_system in ['DICE']:
+                                    tonkmloss_cost = 0
+                                anxiety_cost = 0
+                                stationdistance = year_stationdistance_df.loc[year, power_system]
+                                for daily_kmaccess, daily_mileageactual, daily_mileage_demand in zip(
+                                        daily_km_access_array, daily_mileage_actual, daily_mileage_demand_array):
+                                    if power_system in ['DICE', 'NGICE', 'DHEV', 'NGHEV', 'EDICE', 'ELICE',
+                                                        'NH3ICE', 'H2ICE35', 'HNICE']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = max((annual_fuel_consumption / ch_efficiency - 0.33 * 1 * opd),0) * unit_salary + (2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary) * annual_fuel_consumption / (0.9 * volume)
+                                    # elif power_system in ['PHEV']:
+                                    # anxiety_cost = 0
+                                    # anxiety_cost1 = 0
+                                    # inconvenience_cost =max( (DICE_annual_fuel_consumption / DICE_ch_efficiency -0.33*opd),0)* unit_salary  + (BEV_annual_fuel_consumption / ch_efficiency-0.33*opd) *0.01*unit_salary
+                                    elif power_system in ['H2ICE70', 'FCEV']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = max(
+                                            (annual_fuel_consumption / ch_efficiency - 0.33 * 1 * opd),0) * unit_salary + (2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary) * annual_fuel_consumption / (0.9 * volume)
+                                    elif power_system in ['MICE']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = max(
+                                            (annual_fuel_consumption / ch_efficiency - 0.33 * 1 * opd),
+                                            0) * unit_salary + (
+                                                                     2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary) * annual_fuel_consumption / (
+                                                                     0.9 * volume)
+                                    elif power_system in ['EDPHEV']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = max(
+                                            (EDICE_annual_fuel_consumption / DICE_ch_efficiency - 0.33 * opd),
+                                            0) * unit_salary + max(
+                                            (BEV_annual_fuel_consumption / ch_efficiency - 0.33 * opd),
+                                            0) * 0.01 * unit_salary
+
+                                    elif power_system in ['ELPHEV']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = max(
+                                            (ELICE_annual_fuel_consumption / lng_ch_efficiency - 0.33 * opd),
+                                            0) * unit_salary + max(
+                                            (BEV_annual_fuel_consumption / ch_efficiency - 0.33 * opd),
+                                            0) * 0.01 * unit_salary
+
+                                    elif power_system in ['BEVF282', 'BEVF510', 'BEVF730', 'BEVF900' ]:
+                                        anxietyfactor = 0
+                                        if daily_mileage_demand >= daily_kmaccess:
+                                            anxietyfactor = (daily_mileage_demand - daily_kmaccess) / daily_mileage_demand * (round(daily_mileage_demand / daily_kmaccess) / 2)
+                                            anxiety_costdiesel = anxietyfactor * daily_mileageactual * DICE_real_unit_fc * DICE_fcprice + anxietyfactor * (
+                                                DICE_buycost) / 6 / 200
+                                            anxiety_costrailway = anxietyfactor * baseloadmass * daily_mileageactual * 100 * 0.15  # 假设铁路运输贵10%
+                                            anxiety_costlng = anxietyfactor * daily_mileageactual * lng_real_unit_fc * lng_fcprice + anxietyfactor * (lng_buycost + lng_mmavalibility) / 6 / 240 + lnglosscost / 240
+                                            anxiety_cost2 = anxiety_costdiesel
+                                            if anxiety_cost2 == anxiety_costdiesel:
+                                                anxiety_costdiesel_count += 1
+                                            elif anxiety_cost2 == anxiety_costrailway:
+                                                anxiety_costrailway_count += 1
+                                            else:
+                                                anxiety_costlng_count += 1
+                                            new_data1 = {
+                                                'Year': [year],
+                                                'diesel_count': [anxiety_costdiesel_count],
+                                                'railway_count': [anxiety_costrailway_count],
+                                                'lng_count': [anxiety_costlng_count]
+                                            }
+                                            temp_df = pd.DataFrame(new_data1)
+                                            # 将新数据追加到所有数据中
+                                            all_data1 = pd.concat([all_data1, temp_df], ignore_index=True)
+                                            all_data1.to_excel(writer, sheet_name='year_statistics1', index=False)
+                                            anxiety_cost += anxiety_cost2
+                                            anxiety_cost1 += 1
+                                            inconvenience_cost = (1 - anxietyfactor) * (max((annual_fuel_consumption / ch_efficiency - 0.33 * 1 * opd), 0) * unit_salary + (annual_fuel_consumption / (0.95 * battery_capacity)) * (2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary))
+                                        else:
+                                            anxiety_cost = 0
+                                            anxiety_cost1 = 0
+                                            inconvenience_cost = (1 - anxietyfactor) * (
+                                                    max((annual_fuel_consumption / ch_efficiency - 0.33 * 1 * opd),
+                                                        0) * unit_salary + (
+                                                            annual_fuel_consumption / (0.95 * battery_capacity)) * (
+                                                            2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary))
+
+                                    elif power_system in ['BEVF600', 'BEVF800']:
+                                        anxietyfactor = 0
+                                        if daily_mileage_demand >= daily_kmaccess:
+                                            anxietyfactor = (
+                                                                        daily_mileage_demand - daily_kmaccess) / daily_mileage_demand
+                                            anxiety_costdiesel = anxietyfactor * daily_mileageactual * DICE_real_unit_fc * DICE_fcprice + anxietyfactor * (
+                                                DICE_buycost) / 6 / 200
+                                            anxiety_costrailway = anxietyfactor * baseloadmass * daily_mileageactual * 100 * 0.15  # 假设铁路运输贵10%
+                                            anxiety_costlng = anxietyfactor * daily_mileageactual * lng_real_unit_fc * lng_fcprice + anxietyfactor * (
+                                                    lng_buycost + lng_mmavalibility) / 6 / 240 + lnglosscost / 240
+                                            anxiety_cost2 = anxiety_costdiesel
+                                            if anxiety_cost2 == anxiety_costdiesel:
+                                                anxiety_costdiesel_count += 1
+                                            elif anxiety_cost2 == anxiety_costrailway:
+                                                anxiety_costrailway_count += 1
+                                            else:
+                                                anxiety_costlng_count += 1
+                                            new_data1 = {
+                                                'Year': [year],
+                                                'diesel_count': [anxiety_costdiesel_count],
+                                                'railway_count': [anxiety_costrailway_count],
+                                                'lng_count': [anxiety_costlng_count]
+                                            }
+                                            temp_df = pd.DataFrame(new_data1)
+                                            # 将新数据追加到所有数据中
+                                            all_data1 = pd.concat([all_data1, temp_df], ignore_index=True)
+                                            all_data1.to_excel(writer, sheet_name='year_statistics1', index=False)
+
+                                            anxiety_cost += anxiety_cost2
+                                            anxiety_cost1 += 1
+                                            inconvenience_cost = (1 - anxietyfactor) * (
+                                                    max((annual_fuel_consumption / ch_efficiency - 0.33 * opd),
+                                                        0) * unit_salary + (
+                                                            annual_fuel_consumption / (0.95 * battery_capacity)) * (
+                                                            2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary))
+                                        else:
+                                            anxiety_cost = 0
+                                            anxiety_cost1 = 0
+                                            inconvenience_cost = (1 - anxietyfactor) * (
+                                                    max((annual_fuel_consumption / ch_efficiency - 0.33 * opd),
+                                                        0) * unit_salary + (
+                                                            annual_fuel_consumption / (0.95 * battery_capacity)) * (
+                                                            2 * stationdistance / 100 * real_unit_fc * fcprice + 2 * stationdistance / 80 * unit_salary))
+                                    elif power_system in ['BEVE282', 'BEVE510']:
+                                        anxiety_cost = 0
+                                        anxiety_cost1 = 0
+                                        inconvenience_cost = 0
+                                if power_system in ['DICE']:
+                                    urea_usage_cost = urea_usage_cost
+                                elif power_system in ['PHEV']:
+                                    urea_usage_cost = urea_usage_cost * (1 - UF)
+                                # elif  power_system in ['EDICE']:
+                                # urea_usage_cost = urea_usage_cost * (1-blendrate)
+                                # elif  power_system in [ 'EDPHEV']:
+                                # urea_usage_cost = urea_usage_cost * (1-UF)*(1-blendrate)
+                                else:
+                                    urea_usage_cost = 0
+                                if power_system in ['DICE', 'NGICE', 'EDPHEV', 'ELPHEV', 'MICE', 'EDICE', 'ELICE',
+                                                    'BEVF600', 'BEVF800',
+                                                    'FCEV', 'BEVF282', 'BEVF510', 'BEVE282', 'BEVF730', 'BEVE510',
+                                                    'BEVF900', 'H2ICE70']:
+                                    fueloutput_data.append({
+                                        '车型': vehicle, '年份': year, 'MSRP_value': MSRP_value,
+                                        '动力系统': power_system,
+                                        '购置税': purchasetax,
+                                        '省份': province, '日里程需求': daily_mileage_demand, '年运输天数': opd,
+                                        '日行驶里程': daily_mileage_actual, '一次加油行驶里程': unit_range,
+                                        '一次循环里程': battery_km,
+                                        '年行驶里程': annual_mileage_actual, 'remainrate':remainrate,
+                                        '年均装载系数': load_factor, '年燃油消耗': annual_fuel_consumption,
+                                        '吨公里损失成本': tonkmloss_cost,
+                                        '车型可获得成本': mmavalibility,
+                                        '单位时薪': unit_salary, '可充容量': ablecapacity,
+                                        '补能便利性成本': inconvenience_cost,
+                                        'real_unit_fc': real_unit_fc, '风险溢价': riskcost,
+                                        'anxiety_cost1': anxiety_cost1, '焦虑成本': anxiety_cost,
+                                        '单位维护成本': unit_mmcost, '补能站建设成本': infrastructurecost,
+                                        '尿素使用成本': urea_usage_cost, '二氧化碳排放量': emissionton,
+                                        'realfc': real_unit_fc, 'loss_cost2': loss_cost2,
+                                        '保险费': insura_cost, '报废年龄': retire_age, '电池价格': batteryprice,
+                                        '电池租赁费用': batteryrentcost,
+                                        '报废里程': retirekm, '报废年限': retireyear, '燃料价格': fcprice,
+                                        '燃料消耗成本': fuel_cost,
+                                        '残值率': resale_value_factor, '高速路程占比': highwayratio,
+                                        '碳减排支出': abatement_cost
+                                    })
+                            else:
+                                print(
+                                    f"Charging probability data not found for power system {power_system} in province {province}")
+                        else:
+                            print(f"Salary data not found for vehicle {vehicle} in province {province}")
+                    else:
+                        print(f"Fuel cost data not found for power system {power_system} in year {year}")
+
+    # 结果输出与中间文件处理
+    if not fueloutput_data:
+        print("No data was processed. Please check the input file and parameters.")
+    else:
+        output_df = pd.DataFrame(fueloutput_data)
+        temp_fueloutput_file_path = 'comtt_an_fu_con_results.xlsx'
+        output_df.to_excel(temp_fueloutput_file_path, index=False)
+        print(f"Results have been written to {temp_fueloutput_file_path}")
+
+        # 成本计算逻辑
+        fc_excel_data = pd.ExcelFile(temp_fueloutput_file_path)
+        fc_all_data = {sn: pd.read_excel(temp_fueloutput_file_path, sheet_name=sn) for sn in fc_excel_data.sheet_names}
+        costoutput_data = []
+        for sheet_name, df in fc_all_data.items():
+            for index, row in df.iterrows():
+                vehicle = row['车型'].strip()
+                year = row['年份']
+                MSRP_value = row['MSRP_value']
+                power_system = row['动力系统'].strip()
+                province = row['省份'].strip()
+                opd = int(row['年运输天数'])
+                daily_mileage_demand = float(row['日里程需求'])
+                annual_mileage_actual = float(row['年行驶里程'])
+                load_factor = float(row['年均装载系数'])
+                annual_fuel_consumption = float(row['年燃油消耗'])
+                unit_salary = float(row['单位时薪'])
+                inconvenience_cost = float(row['补能便利性成本'])
+                anxiety_cost = float(row['焦虑成本'])
+                unit_mmcost = float(row['单位维护成本'])
+                retirekm = float(row['报废里程'])
+                retireyear = float(row['报废年限'])
+                battery_km = float(row['一次循环里程'])
+                urea_usage_cost = float(row['尿素使用成本'])
+                insura_cost = float(row['保险费'])
+                resale_value_factor = float(row['残值率'])
+                retire_age = float(row['报废年龄'])
+                fuel_cost = float(row['燃料消耗成本'])
+                tonkmloss_cost = row['吨公里损失成本']
+                mmavalibility = row['车型可获得成本']
+                riskcost = row['风险溢价']
+                batteryprice = row['电池价格']
+                batteryrentcost = row['电池租赁费用']
+                highwayratio = row['高速路程占比']
+                purchasetax = row['购置税']
+                abatement_cost = row['碳减排支出']
+                infrastructurecost = row['补能站建设成本']
+                emissionton = row['二氧化碳排放量']
+                remainrate = row['remainrate']
+                MSRP = MSRP_value / (1 + 0.17)
+                freeway_tolls = annual_mileage_actual * rate_freeway * highwayratio
+                if power_system in year_fcprice_df.columns:
+                    if power_system == 'DICE':
+                        baseMSRP = MSRP
+                        baseresalevalue = resale_value_factor * MSRP
+                    if power_system in ['DICE', 'NGICE', 'MICE', 'H2ICE35', 'H2ICE70', 'NH3ICE', 'NH3ICE', 'HNICE',
+                                        'BEVE', 'PHEV', 'EDPHEV', 'ELPHEV', 'EDICE', 'ELICE']:
+                        resale_value = resale_value_factor * MSRP_value  # 不可以中途换车的残值,车身价格和动力系统价格分开
+                        damageinsura = 280 + resale_value * 0.01088
+                        insura_cost = insura_cost + damageinsura
+                    elif power_system in ['BEVF282', 'BEVF510', 'BEVE282', 'BEVF730', 'BEVE510', 'BEVF600', 'BEVF800',
+                                          'BEVF900']:
+                        resale_value = resale_value_factor * (MSRP_value - batteryprice) * 0.9 + (
+                                math.ceil(annual_mileage_actual * retire_age / battery_km) * battery_km - (
+                                annual_mileage_actual * retire_age)) / battery_km * batteryprice * 0.7
+                        a = resale_value
+
+                        damageinsura = 280 + resale_value * 0.01088
+                        insura_cost = insura_cost + damageinsura
+                    elif power_system in ['FCEV', 'FCPHEV']:
+                        resale_value = resale_value_factor * (MSRP_value - batteryprice) * 0.9 + (
+                                math.ceil(annual_mileage_actual * retire_age / battery_km) * battery_km - (
+                                annual_mileage_actual * retire_age)) / battery_km * batteryprice * 0.7
+                        damageinsura = 280 + resale_value * 0.01088
+                        insura_cost = insura_cost + damageinsura
+                    if power_system in ['DICE', 'NGICE', 'DHEV', 'NGHEV', 'MICE', 'H2ICE35', 'H2ICE70', 'NH3ICE',
+                                        'NH3ICE', 'PHEV', 'FCPHEV', 'EDPHEV', 'ELPHEV', 'EDICE', 'ELICE']:
+                        mm_cost = annual_mileage_actual * unit_mmcost * load_factor + urea_usage_cost
+                        anotherbatterycost = 0
+                    else:
+                        mm_cost = annual_mileage_actual * unit_mmcost * load_factor + urea_usage_cost
+                        anotherbatterycost = (math.ceil(
+                            annual_mileage_actual * retire_age / battery_km) - 1) * batteryprice
+
+                    if year in year_subsidy_df.index and power_system in year_subsidy_df.columns:
+                        regionsubsidy = region_subsidy_df.loc[power_system, province]
+                        subsidy = year_subsidy_df.loc[year, power_system] * regionsubsidy
+                    extracost = (500 * 12 + 500 * 12 + 2000) / 10
+                    # year = yearnow #同样属性的车主换车根据yearnow数据重新选择
+                    # if power_system in [ 'BEVF730', 'BEVE510' ]:
+                    # tonkmloss_cost =  tonkmloss_cost*0.5
+                    total_discounted_cost = 0
+                    # mmavalibility = mmavalibility*0
+                    # tonkmloss_cost = tonkmloss_cost*0.8
+                    for age in range(1, int(retire_age) + 1):
+                        annual_cost = batteryrentcost + fuel_cost + inconvenience_cost + anxiety_cost + mm_cost + insura_cost + freeway_tolls + tonkmloss_cost + abatement_cost
+                        discounted_cost = annual_cost / ((1 + discount_rate) ** age)
+                        total_discounted_cost += discounted_cost
+                    TCO = MSRP_value + anotherbatterycost + purchasetax - resale_value - subsidy + mmavalibility + total_discounted_cost + infrastructurecost
+                    costoutput_data.append({
+                        '车型': vehicle,
+                        '年份': year,
+                        '动力系统': power_system,
+                        '省份': province,
+                        '购置成本': MSRP_value,
+                        '购置税': purchasetax,
+                        '电池租赁费用': batteryrentcost,
+                        '保险费': insura_cost,
+                        '年燃油费用': fuel_cost,
+                        '焦虑成本': anxiety_cost,
+                        '维护费用': mm_cost,
+                        '残值': resale_value,
+                        '电池更换成本': anotherbatterycost,
+                        '补能便利性成本': inconvenience_cost,
+                        '高速费': freeway_tolls,
+                        '吨公里损失成本': tonkmloss_cost,
+                        '负相关成本': ((anxiety_cost + inconvenience_cost) * 6 + infrastructurecost + anotherbatterycost),
+                        '正相关成本': (MSRP_value + tonkmloss_cost * 6),
+                        '年燃油消耗':annual_fuel_consumption,
+                        '总里程限制成本': MSRP_value + (tonkmloss_cost + anxiety_cost + inconvenience_cost) * 6 + infrastructurecost,
+                        '车型可获得成本': mmavalibility,
+                        '其他成本': extracost,
+                        '补贴': subsidy,
+                        '补能站建设成本': infrastructurecost,
+                        '碳减排支出': abatement_cost,
+                        'emissionton': emissionton,
+                        'TCO': TCO,
+                        '使用年龄': retire_age,
+                        '每年成本': annual_cost,
+                        '总折现成本': total_discounted_cost,
+                        '年度成本': annual_cost,
+                        'remainrate':remainrate
+
+                    })
+        # ... [保持原有成本计算逻辑不变] ...
+
+        # 写入年度结果
+        output_df = pd.DataFrame(costoutput_data)
+        output_df.to_excel(writer, sheet_name=f'{year}', index=False)
+        print(f"{year}年数据已写入")
+
+
+
+
+baseline_sum = {2025: 5.4681401048086665e-11,
+2026: 6.692137711981652e-11,
+2027: 8.204239501049537e-11,
+2028: 1.0076686240011662e-10,
+2029: 1.2186707378739175e-10,
+2030: 1.4722923616865565e-10,
+2031: 1.754222629491944e-10,
+2032: 2.0913917008033435e-10,
+2033: 2.498609224158177e-10,
+2034: 2.9863096780352297e-10,
+2035: 3.565730300674148e-10,
+2036: 4.271790661538967e-10,
+2037: 5.123040786682483e-10,
+2038: 6.156002852722165e-10,
+2039: 7.434496382242594e-10,
+2040: 8.985542254515742e-10,
+2041: 1.0835364250101314e-09,
+2042: 1.297660547592909e-09,
+2043: 1.5592591627226983e-09,
+2044: 1.874681506728696e-09,
+2045: 2.255264718432421e-09,
+2046: 2.714799288566511e-09,
+2047: 3.2700767021030324e-09,
+2048: 3.941563753414636e-09,
+2049: 4.7542340466493164e-09,
+2050: 5.738594887861163e-09}
+initial_market_shares = {
+    'DICE': 0.9396, 'NGICE': 0.059, 'BEVS': 0,
+    'DHEV': 0, 'NGHEV': 0, 'BEVF': 0.001429, 'BEVE': 0, 'BEVU': 0,
+    'PHEV': 0, 'FCPHEV': 0, 'FCEV': 0,
+    'MICE': 0, 'BICE': 0, 'H2ICE35': 0, 'H2ICE70': 0, 'NH3ICE': 0, 'HNICE': 0
+}
+all_years_df = pd.DataFrame()
+# 输入/输出文件路径
+temp_costoutput_file_path = 'comtt_annual_cost1.xlsx'
+ADJ_FACTOR_FILE = 'output_results.xlsx'
+A_FACTORS_FILE = 'final_probabilities_merged_with_categories.xlsx'
+COMBINED_OUTPUT = 'combined_results1.xlsx'
+
+# 保有量、排放、成本参数
+TOTAL_INITIAL_STOCK = 7500000
+SCRAP_RATE = 1 / 7
+ANNUAL_SALES_TOTAL =TOTAL_INITIAL_STOCK*SCRAP_RATE
+
+# 分类及 β 值
+traditional_vehicles = ['DICE', 'NGICE']
+electric_vehicles = ['BEVF730', 'BEVE510']
+hybrid_vehicles = ['EDPHEV', 'ELPHEV']
+low_carbon_vehicles = ['FCEV', 'MICE', 'H2ICE70']
+
+betas = {
+    '传统车型': -0.99, '电动车型': -0.95, '混动车型': -0.79, '低碳车型': -0.52,
+    'DICE': -0.8, 'NGICE': -0.8,
+    'BEVF282': -0.78, 'BEVE282': -0.78, 'BEVF423': -0.78, 'BEVE510': -0.78, 'BEVF730': -0.78,
+    'EDPHEV': -0.7, 'ELPHEV': -0.7,
+    'FCEV': -0.62, 'MICE': -0.62, 'H2ICE70': -0.62
+}
+this_year_stock = {}
+initial_stock = pd.Series({
+    'DICE': 6293038.26,
+    'NGICE': 1173961.74,
+    'BEVF730': 10200,
+    'BEVE510': 2550,
+    'EDPHEV': 5061.225,
+    'ELPHEV': 188.77725,
+    'FCEV': 11940,
+    'MICE': 3000,
+    'H2ICE70': 60
+})
+stk = initial_stock.copy()
+# 获取分类函数
+def get_category(powertrain):
+    if powertrain in traditional_vehicles:
+        return '传统车型'
+    if powertrain in electric_vehicles:
+        return '电动车型'
+    if powertrain in hybrid_vehicles:
+        return '混动车型'
+    if powertrain in low_carbon_vehicles:
+        return '低碳车型'
+    return '其他'
+
+# 效用/概率计算
+def calculate_utility(segment, adjustment_factors_df, betas, tco_col, powertrain_col, A_factors_df):
+    segment['Category'] = segment[powertrain_col].apply(get_category)
+    owner_id = segment['Owner'].iloc[0]
+    segment['Adjustment_Factor'] = segment.apply(
+        lambda row: adjustment_factors_df.loc[
+            (adjustment_factors_df['Owner'] == owner_id) & (adjustment_factors_df['Category'] == row['Category']),
+            'Adjustment_Factor'
+        ].values[0], axis=1
+    )
+    segment['Best_Ci'] = A_factors_df['Best_Ci'].iloc[segment.index].values
+    segment['Utility'] = (segment[tco_col] + segment['Best_Ci'] + segment['Adjustment_Factor']) * segment[powertrain_col].map(betas) * 1e-5
+    exp_utility = np.exp(segment['Utility'])
+    exputility_sum=exp_utility.sum()
+    #print(f" exputility_sum { exputility_sum}")
+    segment['Probability'] = exp_utility / exp_utility.sum()
+    return exputility_sum,segment[[powertrain_col, tco_col, 'Probability', 'Utility', 'Adjustment_Factor', 'Best_Ci']]
+
+# 封装函数：计算并返回所需结果
+def calculate_emission( years=[2020,2021,2022,2023,2024]):  # 返回：marginal_abatement_cost, market_shares_df, stock_details_df, last_merged_df
+    global stk  # 重置保有量
+    stk = pd.Series({
+        'DICE': 6293038.26,
+        'NGICE': 1173961.74,
+        'BEVF730': 10200,
+        'BEVE510': 2550,
+        'EDPHEV': 5061.225,
+        'ELPHEV': 188.77725,
+        'FCEV': 11940,
+        'MICE': 3000,
+        'H2ICE70': 60
+    })
+    all_years_probs = []
+    stock_records = []
+    summary_records = []
+    mac_records = []
+    last_merged = []
+    emission_detail_records = []
+    year_powertrain_stock = {}
+    year_powertrain_sold = {}
+    cs_sum = 0.0
+    fuel_subsidy_total_all_years = 0.0
+    subsidy_detail_records = []
+    for year in years:
+        # 读取数据
+        cost_df = pd.read_excel(temp_costoutput_file_path, sheet_name=str(year), engine='openpyxl')
+        adjustment_factors_df = pd.read_excel('output_results.xlsx', sheet_name=str(year), engine='openpyxl')
+        A_factors_df = pd.read_excel('final_probabilities_merged_with_categories.xlsx', sheet_name=str(year),
+                                     engine='openpyxl')
+        # 计算Final_Prob
+        segment_size = 9
+        cost_df['Owner'] = cost_df.index // segment_size + 1
+        prob_list = []
+        year_exp_sum = 0.0
+        for i in range(len(cost_df) // segment_size):
+            seg = cost_df.iloc[i * segment_size:(i + 1) * segment_size].copy()
+            exput_sum, seg_probs = calculate_utility(seg, adjustment_factors_df, betas, 'TCO', '动力系统', A_factors_df)
+            prob_list.append(seg_probs)
+            year_exp_sum = exput_sum
+        prob_df = pd.concat(prob_list, ignore_index=True)
+        final_prob_df = prob_df[['动力系统', 'Probability']].rename(columns={'Probability': 'final_prob'})
+        final_prob = pd.concat(prob_list).groupby('动力系统')['Probability'].mean().reset_index()
+        final_prob.rename(columns={'Probability': str(year)}, inplace=True)
+        all_years_probs.append(final_prob)
+        # 任务1：保有量计算
+        year_powertrain_sold[year] = {}
+
+        for _, r in final_prob_df.iterrows():
+            pt, prob = r['动力系统'], r['final_prob']  # 先赋值 pt
+            prestk = stk[pt]
+            scrapped = prestk * SCRAP_RATE
+            sold = ANNUAL_SALES_TOTAL * prob
+            stk[pt] = prestk - scrapped + sold
+            this_year_stock[pt] = stk[pt]
+            stock_records.append({
+                'year': year,
+                '动力系统': pt,
+                'prev_stock': prestk,
+                'scrapped': scrapped,
+                'sold': sold,
+                'stock': stk[pt]
+            })
+            year_powertrain_sold[year][pt] = sold
+
+        year_powertrain_stock[year] = this_year_stock
+
+        # 任务2：排放与社会成本汇总
+        stock_df = pd.DataFrame.from_dict(this_year_stock, orient='index', columns=['stock']).rename_axis(
+            '动力系统').reset_index()
+        merged = cost_df.merge(stock_df, on='动力系统', how='left')
+        merged['emission_total'] = merged['emissionton'] * merged['stock']
+        merged['cost_total'] = merged['TCO'] * merged['stock']
+        #print(merged)
+        merged['year'] = year
+        emission_detail_records.append(merged[['year', '动力系统', 'emissionton', 'emission_total']])
+        last_merged = merged
+
+        # 3) 消费者剩余计算
+        cs = (1 / (-0.95 * 1e-5) * (np.log(year_exp_sum) - np.log(baseline_sum[year])))
+        #print(f"year_exp_sum{year_exp_sum}")
+        #print(f"baseline_sum[year]{baseline_sum[year]}")
+        #print(f"np.log(year_exp_sum){np.log(year_exp_sum)}")
+        #print(f"np.log(baseline_sum[year]){np.log(baseline_sum[year])}")
+        #cs = (1 / (-0.95 * 1e-5) * np.log(baseline_sum[year]))
+        cs_sum += cs
+
+        total_e = merged['emission_total'].sum()
+        total_c = merged['cost_total'].sum()
+        summary_records.append({'year': year, 'total_emission': total_e, 'total_cost': total_c,'consumer_surplus': cs, 'cs_sum': cs_sum})
+
+
+        # 边际减碳成本
+        cum_cost = sum(x['total_cost'] for x in summary_records) - 1.2966905E+14
+        cost_sum = sum(x['total_cost'] for x in summary_records)
+        cum_emit = 4.9069542E+09-sum(x['total_emission'] for x in summary_records)
+        emit_sum = sum(x['total_emission'] for x in summary_records)
+        mac = cum_cost / cum_emit if cum_emit else 0
+        #print(f"mac{mac}")
+        if year == years[-1]:
+            print(f"cs_sum {cs_sum:.4e}")
+            print(f"cost_sum {cost_sum:.4e}")
+            mac_records.append({
+                'year': year,
+                'MAC': mac,
+                'cs_sum':cs_sum,
+                'cost_sum': cost_sum,
+                'emit_sum': emit_sum,
+
+            })
+    emission_detail_df = pd.concat(emission_detail_records, ignore_index=True)
+    emission_detail_df.to_excel('emission_details.xlsx', index=False)
+    # 构造输出 DataFrame
+    market_shares_df = all_years_probs[0]
+    for df in all_years_probs[1:]:
+        market_shares_df = market_shares_df.merge(df, on='动力系统', how='outer')
+
+    stock_details_df = pd.DataFrame(stock_records)
+    mac_df = pd.DataFrame(mac_records)
+
+    # 写入 Excel
+    with pd.ExcelWriter(COMBINED_OUTPUT, mode='w', engine='openpyxl') as writer:
+        market_shares_df.to_excel(writer, sheet_name='Market_Shares', index=False)
+        stock_details_df.to_excel(writer, sheet_name='Stock_Details', index=False)
+        pd.DataFrame(summary_records).to_excel(writer, sheet_name='Summary', index=False)
+        mac_df.to_excel(writer, sheet_name='MAC', index=False)
+        pd.DataFrame(subsidy_detail_records).to_excel(writer, sheet_name='Subsidy_Details', index=False)
+        print(f"combine_result1")
+
+    return mac, cs_sum, cost_sum,emit_sum,cum_cost, cum_emit,market_shares_df, stock_details_df, last_merged,summary_records,mac_records
+
+if __name__ == "__main__":
+    calculate_annual_cost()  # 测试时调用
+    calculate_emission()
