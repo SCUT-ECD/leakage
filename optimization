@@ -1,0 +1,397 @@
+import argparse
+import importlib.util
+import os
+import sys
+import traceback
+from multiprocessing import freeze_support
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import differential_evolution
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+WORK_DIR = Path(__file__).resolve().parent
+PRICE_MODEL_DIR = WORK_DIR
+PRICE_CORE_FILE = WORK_DIR / "defCVrr1.py"
+SUBSIDY_SOURCE_DIR = PROJECT_ROOT / "leakage" / "opleakage_price" / "opleakage_price -ED45"
+
+YEARS = [2025, 2030, 2035, 2040, 2045, 2050]
+N_YEARS = len(YEARS)
+TARGET_EMISSION = 3.516e9
+
+FASTSIM_FILE = WORK_DIR / "tt_output_fastsim_tractormix_S.xlsx"
+VEHICLE_FILE = WORK_DIR / "tt_vehicle_represent_params_tractormix.xlsx"
+MC_RESULTS_FILE = WORK_DIR / "tt_mc_results_ltractor.xlsx"
+CITECARBON_FILE = WORK_DIR / "citecarbonfactor.xlsx"
+BASE_YEAR_FILE = WORK_DIR / "year_varies_tractormix_S.xlsx"
+BASE_SUBSIDY_FILE = SUBSIDY_SOURCE_DIR / "esubsidy.xlsx"
+
+TEMP_SUBSIDY_FILE = WORK_DIR / "joint_es_temp.xlsx"
+TEMP_REMAINRATE_FILE = WORK_DIR / "joint_remainrate_temp.xlsx"
+TEMP_COST_FILE = WORK_DIR / "joint_comtt_annual_cost.xlsx"
+COMBINED_OUTPUT_FILE = WORK_DIR / "joint_combined_results.xlsx"
+RESULT_FILE = WORK_DIR / "opt_subsidy_ratio_joint.xlsx"
+REMAINRATE_RESULT_FILE = WORK_DIR / "joint_remainrate_optimized.xlsx"
+SUBSIDY_RESULT_FILE = WORK_DIR / "joint_esubsidy_optimized.xlsx"
+EMISSION_RECORD_FILE = WORK_DIR / "joint_detailed_emission_records.xlsx"
+EMISSION_SUMMARY_FILE = WORK_DIR / "joint_detailed_emission_summary.xlsx"
+
+MONOTONIC_PENALTY_SCALE = 1e20
+
+LAST_EVAL = {}
+EVAL_COUNTER = 0
+
+
+def load_module(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module from {file_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(PRICE_MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(PRICE_MODEL_DIR))
+
+joint_core = load_module("joint_price_core", PRICE_CORE_FILE)
+joint_core.temp_costoutput_file_path = str(TEMP_COST_FILE)
+joint_core.COMBINED_OUTPUT = str(COMBINED_OUTPUT_FILE)
+
+
+BASE_REMAINRATE_DF = pd.read_excel(BASE_YEAR_FILE, sheet_name="remainrate", index_col=0).astype(float)
+BASE_SUBSIDY_DF = pd.read_excel(BASE_SUBSIDY_FILE, sheet_name="esubsidy", index_col=0).astype(float)
+
+
+def unpack_vector(x: np.ndarray):
+    dice_rr = x[0:N_YEARS]
+    ngice_rr = x[N_YEARS:2 * N_YEARS]
+    edice_subsidy = x[2 * N_YEARS:3 * N_YEARS]
+    elice_subsidy = x[3 * N_YEARS:4 * N_YEARS]
+    return dice_rr, ngice_rr, edice_subsidy, elice_subsidy
+
+
+def build_candidate_tables(x: np.ndarray):
+    remainrate_df = BASE_REMAINRATE_DF.copy()
+    subsidy_df = BASE_SUBSIDY_DF.copy()
+    dice_rr, ngice_rr, edice_subsidy, elice_subsidy = unpack_vector(x)
+
+    remainrate_df["DICE"] = remainrate_df["DICE"].astype(float)
+    remainrate_df["NGICE"] = remainrate_df["NGICE"].astype(float)
+    subsidy_df["EDICE"] = subsidy_df["EDICE"].astype(float)
+    subsidy_df["ELICE"] = subsidy_df["ELICE"].astype(float)
+
+    for idx, year in enumerate(YEARS):
+        remainrate_df.loc[year, "DICE"] = dice_rr[idx]
+        remainrate_df.loc[year, "NGICE"] = ngice_rr[idx]
+        subsidy_df.loc[year, "EDICE"] = edice_subsidy[idx]
+        subsidy_df.loc[year, "ELICE"] = elice_subsidy[idx]
+
+    return remainrate_df.astype(float), subsidy_df.astype(float)
+
+
+def calculate_monotonic_penalty(values: np.ndarray) -> float:
+    penalty = 0.0
+    for idx in range(1, len(values)):
+        if values[idx] > values[idx - 1]:
+            penalty += (values[idx] - values[idx - 1]) * MONOTONIC_PENALTY_SCALE
+    return penalty
+
+
+def calculate_constraint_penalties(emit_sum: float, e_no_leak: float, log_prefix: str = ""):
+    if emit_sum < e_no_leak:
+        if e_no_leak - emit_sum < 1e8:
+            leakage_gap = 0.0
+            print(f"{log_prefix}slack1 {leakage_gap}")
+        else:
+            slack1 = emit_sum - e_no_leak
+            leakage_gap = (-slack1) ** 2.5 * 1e10
+            print(f"{log_prefix}slack2 {leakage_gap}")
+    else:
+        leakage_gap = max(0.0, emit_sum - e_no_leak) **2.5 * 1e-6
+        print(f"{log_prefix}slack3 {leakage_gap}")
+
+    if emit_sum < TARGET_EMISSION:
+        target_gap = 0.0
+
+    else:
+        target_gap = (emit_sum-TARGET_EMISSION) * 1e16
+    print(f"{log_prefix}target_gap {target_gap}")
+    constraint_penalty = leakage_gap + target_gap
+    return target_gap, leakage_gap, constraint_penalty
+
+
+def evaluate_candidate(x: np.ndarray):
+    remainrate_df, subsidy_df = build_candidate_tables(x)
+    return joint_core.run_joint_case(
+        years=YEARS,
+        fastsim_file=str(FASTSIM_FILE),
+        vehicle_file=str(VEHICLE_FILE),
+        year_file=str(BASE_YEAR_FILE),
+        mc_results_file=str(MC_RESULTS_FILE),
+        remainrate_df=remainrate_df,
+        subsidy_df=subsidy_df,
+        temp_remainrate_file=str(TEMP_REMAINRATE_FILE),
+        temp_esubsidy_file=str(TEMP_SUBSIDY_FILE),
+        output_cost_file=str(TEMP_COST_FILE),
+        combined_output_file=str(COMBINED_OUTPUT_FILE),
+        citecarbon_file=str(CITECARBON_FILE),
+        emission_factor_file=str(FASTSIM_FILE)
+    )
+
+
+def objective(x: np.ndarray) -> float:
+    global LAST_EVAL, EVAL_COUNTER
+    EVAL_COUNTER += 1
+
+    dice_rr, ngice_rr, _, _ = unpack_vector(x)
+    monotonic_penalty = calculate_monotonic_penalty(dice_rr) + calculate_monotonic_penalty(ngice_rr)
+
+    try:
+        metrics = evaluate_candidate(x)
+        target_gap, leakage_gap, constraint_penalty = calculate_constraint_penalties(
+            metrics["emit_sum"],
+            metrics["e_no_leak"],
+            log_prefix=f"[Eval {EVAL_COUNTER:04d}] ",
+        )
+        joint_cost = metrics["cost_sum"] + 1.2 * metrics["total_subsidy"]
+        objective_value = joint_cost + monotonic_penalty + constraint_penalty
+
+        LAST_EVAL = {
+            **metrics,
+            "joint_cost": joint_cost,
+            "objective_value": objective_value,
+            "target_gap": target_gap,
+            "leakage_gap": leakage_gap,
+            "constraint_penalty": constraint_penalty,
+            "monotonic_penalty": monotonic_penalty,
+            "x": np.array(x, dtype=float),
+        }
+        print(
+            f"[Eval {EVAL_COUNTER:04d}] "
+            f"obj={objective_value:.6e}, "
+            f"joint_cost={joint_cost:.6e}, "
+            f"emit={metrics['emit_sum']:.6e}, "
+            f"E_no_leak={metrics['e_no_leak']:.6e}, "
+            f"subsidy={metrics['total_subsidy']:.6e}"
+        )
+        return objective_value
+    except Exception as exc:
+        print(f"[Eval {EVAL_COUNTER:04d}] failed: {exc}")
+        traceback.print_exc()
+        return 1e30 + monotonic_penalty
+
+
+def initial_guess() -> np.ndarray:
+    dice_rr = BASE_REMAINRATE_DF.loc[YEARS, "DICE"].to_numpy(dtype=float)
+    ngice_rr = BASE_REMAINRATE_DF.loc[YEARS, "NGICE"].to_numpy(dtype=float)
+    edice_subsidy = BASE_SUBSIDY_DF.loc[YEARS, "EDICE"].to_numpy(dtype=float)
+    elice_subsidy = BASE_SUBSIDY_DF.loc[YEARS, "ELICE"].to_numpy(dtype=float)
+    return np.concatenate([dice_rr, ngice_rr, edice_subsidy, elice_subsidy])
+
+
+def build_bounds():
+    dice_bounds = [
+        (1.0, 1.0),
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (0.0, 1.0),
+        (0.0, 1.0),
+    ]
+    ngice_bounds = [(1.0, 1.0)] * N_YEARS
+    edice_bounds = [
+        (0.0, 0.0),
+        (0.0, 0.0),
+        (0.0, 0.6),
+        (0.0, 5.8),
+        (0.0, 9.4),
+        (0.0, 9.5),
+    ]
+    elice_bounds = [(0.0, 0.0)] * N_YEARS
+    return dice_bounds + ngice_bounds + edice_bounds + elice_bounds
+
+
+def save_results(x: np.ndarray, metrics: dict, result=None) -> None:
+    remainrate_df = metrics["remainrate_df"]
+    subsidy_df = metrics["subsidy_df"]
+    benchmark_records = metrics["benchmark_records"]
+
+    remainrate_df.to_excel(REMAINRATE_RESULT_FILE, sheet_name="remainrate", index=True)
+    subsidy_df.to_excel(SUBSIDY_RESULT_FILE, sheet_name="esubsidy", index=True)
+    benchmark_records.to_excel(EMISSION_RECORD_FILE, sheet_name="NoLeakageBenchmark", index=False)
+    pd.DataFrame(
+        [
+            {
+                "E_no_leak": metrics["e_no_leak"],
+                "Target_Emission": TARGET_EMISSION,
+                "Total_Emission": metrics["emit_sum"],
+                "Actual_Total_PCO": metrics["cost_sum"],
+                "Benchmark_Total_PCO": metrics["total_pco"],
+                "Total_Subsidy": metrics["total_subsidy"],
+                "Joint_Cost": metrics["joint_cost"],
+                "PCO_plus_1_2_Subsidy": metrics["cost_sum"] + 1.2 * metrics["total_subsidy"],
+                "Objective_Value": metrics["objective_value"],
+                "Target_Gap": metrics["target_gap"],
+                "Leakage_Gap": metrics["leakage_gap"],
+                "Constraint_Penalty": metrics["constraint_penalty"],
+                "Monotonic_Penalty": metrics["monotonic_penalty"],
+            }
+        ]
+    ).to_excel(EMISSION_SUMMARY_FILE, sheet_name="Summary", index=False)
+
+    dice_rr, ngice_rr, edice_subsidy, elice_subsidy = unpack_vector(x)
+    decision_df = pd.DataFrame(
+        {
+            "Year": YEARS,
+            "DICE_Remainrate": dice_rr,
+            "NGICE_Remainrate": ngice_rr,
+            "EDICE_Subsidy": edice_subsidy,
+            "ELICE_Subsidy": elice_subsidy,
+        }
+    )
+    summary_df = pd.DataFrame(
+        [
+            {
+                "Objective_Value": metrics["objective_value"],
+                "Joint_Cost": metrics["joint_cost"],
+                "Actual_Total_PCO": metrics["cost_sum"],
+                "Benchmark_Total_PCO": metrics["total_pco"],
+                "Total_Subsidy": metrics["total_subsidy"],
+                "PCO_plus_1_2_Subsidy": metrics["cost_sum"] + 1.2 * metrics["total_subsidy"],
+                "Total_Emission": metrics["emit_sum"],
+                "E_no_leak": metrics["e_no_leak"],
+                "Target_Emission": TARGET_EMISSION,
+                "Target_Gap": metrics["target_gap"],
+                "Leakage_Gap": metrics["leakage_gap"],
+                "MAC": metrics["mac"],
+                "Consumer_Surplus": metrics["cs_sum"],
+                "Cost_Sum": metrics["cost_sum"],
+                "Cum_Cost": metrics["cum_cost"],
+                "Cum_Emit": metrics["cum_emit"],
+                "Constraint_Penalty": metrics["constraint_penalty"],
+                "Monotonic_Penalty": metrics["monotonic_penalty"],
+                "Success": None if result is None else bool(result.success),
+                "Message": "" if result is None else str(result.message),
+                "Iterations": None if result is None else result.nit,
+                "Function_Evals": None if result is None else result.nfev,
+            }
+        ]
+    )
+
+    with pd.ExcelWriter(RESULT_FILE, engine="openpyxl", mode="w") as writer:
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        decision_df.to_excel(writer, sheet_name="Decision_Variables", index=False)
+        remainrate_df.reset_index().rename(columns={"index": "Year"}).to_excel(
+            writer,
+            sheet_name="remainrate",
+            index=False,
+        )
+        subsidy_df.reset_index().rename(columns={"index": "Year"}).to_excel(
+            writer,
+            sheet_name="esubsidy",
+            index=False,
+        )
+        benchmark_records.to_excel(writer, sheet_name="NoLeakage_Benchmark", index=False)
+        metrics["market_shares_df"].to_excel(writer, sheet_name="Market_Shares", index=False)
+        metrics["stock_df"].to_excel(writer, sheet_name="Stock_Data", index=False)
+        metrics["merged_df"].to_excel(writer, sheet_name="Merged_Data", index=False)
+        pd.DataFrame(metrics["summary_records"]).to_excel(writer, sheet_name="Summary_Records", index=False)
+        pd.DataFrame(metrics["mac_records"]).to_excel(writer, sheet_name="MAC", index=False)
+
+
+def run_check() -> None:
+    x0 = initial_guess()
+    metrics = evaluate_candidate(x0)
+    target_gap, leakage_gap, constraint_penalty = calculate_constraint_penalties(
+        metrics["emit_sum"],
+        metrics["e_no_leak"],
+    )
+    monotonic_penalty = 0.0
+    joint_cost = metrics["cost_sum"] + 1.2 * metrics["total_subsidy"]
+    metrics.update(
+        {
+            "joint_cost": joint_cost,
+            "objective_value": joint_cost + constraint_penalty,
+            "target_gap": target_gap,
+            "leakage_gap": leakage_gap,
+            "constraint_penalty": constraint_penalty,
+            "monotonic_penalty": monotonic_penalty,
+        }
+    )
+    save_results(x0, metrics, result=None)
+    print(f"Baseline check completed. Results saved to {RESULT_FILE}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Joint optimization of subsidy and blending ratio.")
+    parser.add_argument("--check", action="store_true", help="Only evaluate the baseline configuration once.")
+    parser.add_argument("--maxiter", type=int, default=80, help="Differential evolution max iterations.")
+    parser.add_argument("--popsize", type=int, default=8, help="Differential evolution population size.")
+    parser.add_argument("--tol", type=float, default=1e-3, help="Differential evolution tolerance.")
+    parser.add_argument("--seed", type=int, default=2, help="Random seed for reproducibility.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    os.chdir(WORK_DIR)
+    args = parse_args()
+
+    if args.check:
+        run_check()
+        return
+
+    bounds = build_bounds()
+    result = differential_evolution(
+        func=objective,
+        bounds=bounds,
+        strategy="best1bin",
+        maxiter=args.maxiter,
+        popsize=args.popsize,
+        tol=args.tol,
+        mutation=(0.3, 0.7),
+        recombination=0.7,
+        polish=False,
+        workers=1,
+        disp=True,
+        seed=args.seed,
+    )
+
+    metrics = evaluate_candidate(result.x)
+    target_gap, leakage_gap, constraint_penalty = calculate_constraint_penalties(
+        metrics["emit_sum"],
+        metrics["e_no_leak"],
+    )
+    dice_rr, ngice_rr, _, _ = unpack_vector(result.x)
+    monotonic_penalty = calculate_monotonic_penalty(dice_rr) + calculate_monotonic_penalty(ngice_rr)
+    joint_cost = metrics["cost_sum"] + 1.2 * metrics["total_subsidy"]
+    metrics.update(
+        {
+            "joint_cost": joint_cost,
+            "objective_value": joint_cost + monotonic_penalty + constraint_penalty,
+            "target_gap": target_gap,
+            "leakage_gap": leakage_gap,
+            "constraint_penalty": constraint_penalty,
+            "monotonic_penalty": monotonic_penalty,
+        }
+    )
+    save_results(result.x, metrics, result=result)
+
+    print("Optimization completed.")
+    print(f"Success: {result.success}")
+    print(f"Message: {result.message}")
+    print(f"Objective: {metrics['objective_value']:.6e}")
+    print(f"Joint cost (cost_sum + 1.2 * subsidy): {joint_cost:.6e}")
+    print(f"Total emission: {metrics['emit_sum']:.6e}")
+    print(f"E_no_leak: {metrics['e_no_leak']:.6e}")
+    print(f"Results saved to {RESULT_FILE}")
+
+
+if __name__ == "__main__":
+    freeze_support()
+    main()
